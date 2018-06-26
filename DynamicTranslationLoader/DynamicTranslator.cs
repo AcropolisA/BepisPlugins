@@ -2,6 +2,7 @@
 using BepInEx.Common;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -9,6 +10,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using ADV;
 using BepInEx.Logging;
+using TARC.Compiler;
 using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -20,7 +22,11 @@ namespace DynamicTranslationLoader
     [BepInPlugin(GUID: "com.bepis.bepinex.dynamictranslator", Name: "Dynamic Translator", Version: "3.0")]
     public class DynamicTranslator : BaseUnityPlugin
     {
-        private static Dictionary<string, string> translations = new Dictionary<string, string>();
+        public static List<Archive> TLArchives = new List<Archive>();
+
+		private static Dictionary<string, CompiledLine> textTranslations = new Dictionary<string, CompiledLine>();
+
+		private static Dictionary<Regex, CompiledLine> regexTranslations = new Dictionary<Regex, CompiledLine>();
 
         private static Dictionary<WeakReference, string> originalTranslations = new Dictionary<WeakReference, string>();
 
@@ -31,6 +37,7 @@ namespace DynamicTranslationLoader
         public static event Func<object, string, string> OnUnableToTranslateTextMeshPro;
 
 
+	    private static string CurrentEXE = Process.GetCurrentProcess().ProcessName.Replace(".exe", "");
 
         Event ReloadTranslationsKeyEvent = Event.KeyboardEvent("f10");
         Event DumpUntranslatedTextKeyEvent = Event.KeyboardEvent("#f10");
@@ -60,27 +67,31 @@ namespace DynamicTranslationLoader
 
         void LoadTranslations()
         {
-            translations.Clear();
-            var dirTranslation = Path.Combine(Utility.PluginsDirectory, "translation");
-            var dirTranslationText = Path.Combine(dirTranslation, "Text");
+			Logger.Log(LogLevel.Debug, "Loading all translations");
 
-            if (!Directory.Exists(dirTranslationText))
-                Directory.CreateDirectory(dirTranslationText);
+			//TODO: load .bin files here
+			
+	        Logger.Log(LogLevel.Debug, $"Loaded {TLArchives.Count} archives");
 
-            string[] translation = Directory.GetFiles(dirTranslationText, "*.txt", SearchOption.AllDirectories)
-                .SelectMany(file => File.ReadAllLines(file))
-                .ToArray();
+            TLArchives.Clear();
 
-            for (int i = 0; i < translation.Length; i++)
-            {
-                string line = translation[i];
-                if (!line.Contains('='))
-                    continue;
+	        var dirTranslation = Path.Combine(Utility.PluginsDirectory, "translation");
+	        var dirTranslationText = Path.Combine(dirTranslation, "Text");
+	        if (!Directory.Exists(dirTranslationText))
+		        Directory.CreateDirectory(dirTranslationText);
 
-                string[] split = line.Split('=');
+	        try
+	        {
+		        TLArchives.Add(new MarkupCompiler().CompileArchive(dirTranslationText));
 
-                translations[split[0].Trim()] = split[1];
-            }
+		        Logger.Log(LogLevel.Debug, $"Loaded {TLArchives.Last().Sections.Sum(x => x.Lines.Count)} lines from text");
+	        }
+			catch (Exception ex)
+	        {
+				Logger.Log(LogLevel.Error | LogLevel.Message, "Unable to load translations from text!");
+				Logger.Log(LogLevel.Error, ex);
+	        }
+            
 
             //ITL
             var di_tl = new DirectoryInfo(Path.Combine(dirTranslation, "Images"));
@@ -121,14 +132,35 @@ namespace DynamicTranslationLoader
 
         void LevelFinishedLoading(Scene scene, LoadSceneMode mode)
         {
-            //TranslateScene(scene);
-        }
+			TranslateScene(scene);
+		}
+
+	    private static bool TryGetRegex(string input, out CompiledLine line, out Match regexMatch)
+	    {
+		    Match match;
+		    foreach (var kv in regexTranslations)
+		    {
+			    if ((match = kv.Key.Match(input)).Success)
+			    {
+				    line = kv.Value;
+				    regexMatch = match;
+				    return true;
+			    }
+		    }
+
+		    line = null;
+		    regexMatch = null;
+		    return false;
+	    }
 
         public static string Translate(string input, object obj)
         {
             GUIUtility.systemCopyBuffer = input;
 
-            if(string.IsNullOrEmpty(input)) return input;
+            if(string.IsNullOrEmpty(input)) 
+	            return input;
+
+	        string trimmedInput = input.Trim();
 
             // Consider changing this! You have a dictionary, but you iterate instead of making a lookup. Why do you not use the WeakKeyDictionary, you have instead? 
             if (!originalTranslations.Any(x => x.Key.Target == obj)) //check if we don't have the object in the dictionary
@@ -137,11 +169,15 @@ namespace DynamicTranslationLoader
                 originalTranslations.Add(new WeakReference(obj), input);
             }
 
-            string translation;
-            if (translations.TryGetValue(input.Trim(), out translation))
+	        CompiledLine translation;
+	        if (textTranslations.TryGetValue(trimmedInput, out translation))
             { 
-                return translation;
+                return translation.TranslatedLine;
             }
+			else if (TryGetRegex(input, out translation, out Match match))
+	        {
+		        return translation.TranslatedLine;
+	        }
             else if(obj is Text)
             {
                 var immediatelyTranslated = OnUnableToTranslateUGUI?.Invoke( obj, input );
@@ -154,8 +190,8 @@ namespace DynamicTranslationLoader
             }
             
             // Consider changing this! You make a value lookup in a dictionary, which scales really poorly
-            if (!untranslated.Contains(input) && !translations.ContainsValue(input))
-                untranslated.Add(input);
+            if (!untranslated.Contains(trimmedInput))
+                untranslated.Add(trimmedInput);
 
             return input;
         }
@@ -217,28 +253,52 @@ namespace DynamicTranslationLoader
             TranslateAll();
         }
 
+	    void LoadSceneTranslations(int sceneIndex)
+	    {
+			Logger.Log(LogLevel.Debug, $"Loading translations for scene {sceneIndex}");
+
+		    textTranslations.Clear();
+		    regexTranslations.Clear();
+
+		    foreach (Archive arc in TLArchives)
+				foreach (Section section in arc.Sections)
+				{
+					if (!section.Exe.Equals("all", StringComparison.OrdinalIgnoreCase) && !section.Exe.Equals(CurrentEXE, StringComparison.OrdinalIgnoreCase))
+						continue;
+
+					foreach (var line in section.Lines)
+					{
+						if (line.Levels.Any(x => x == (byte)sceneIndex || x == 255))
+						{
+							if (line.Flags.IsOriginalRegex)
+								regexTranslations[new Regex(line.OriginalLine)] = line;
+							else
+								textTranslations[line.OriginalLine] = line;
+						}
+					}
+				}
+	    }
+
         void TranslateScene(Scene scene)
         {
-            //foreach (GameObject obj in scene.GetRootGameObjects())
-            //    foreach (TextMeshProUGUI gameObject in obj.GetComponentsInChildren<TextMeshProUGUI>(true))
-            //    {
-            //        //gameObject.text = "Harsh is shit";
+			LoadSceneTranslations(scene.buildIndex);
 
-            //        gameObject.text = Translate(gameObject.text, gameObject);
-            //    }
-        }
+	        Logger.Log(LogLevel.Debug, $"Translating scene {scene.buildIndex}");
+
+			foreach (GameObject obj in scene.GetRootGameObjects())
+				foreach (TextMeshProUGUI gameObject in obj.GetComponentsInChildren<TextMeshProUGUI>(true))
+				{
+					//gameObject.text = "Harsh is shit";
+
+					gameObject.text = Translate(gameObject.text, gameObject);
+				}
+		}
 
         void Dump()
         {
             string output = "";
 
-            var fullUntranslated = originalTranslations
-                .Where(x => !translations.ContainsKey(x.Value))
-                .Select(x => x.Value)
-                .Distinct()
-                .Union(untranslated);
-
-            foreach (var text in fullUntranslated)
+            foreach (var text in untranslated)
                 if (!Regex.Replace(text, @"[\d-]", string.Empty).IsNullOrWhiteSpace()
                         && !text.Contains("Reset"))
                     output += $"{text.Trim()}=\r\n";
@@ -517,24 +577,24 @@ namespace DynamicTranslationLoader
             sw.Flush();
         }
 
-        #endregion
+		#endregion
 
 
-        #region MonoBehaviour
-        //void OnEnable()
-        //{
-        //    SceneManager.sceneLoaded += LevelFinishedLoading;
-        //}
+		#region MonoBehaviour
+		void OnEnable()
+		{
+			SceneManager.sceneLoaded += LevelFinishedLoading;
+		}
 
-        //void OnDisable()
-        //{
-        //    SceneManager.sceneLoaded -= LevelFinishedLoading;
-        //}
-        #endregion
+		void OnDisable()
+		{
+			SceneManager.sceneLoaded -= LevelFinishedLoading;
+		}
+		#endregion
 
-        #region Scenario & Communication Translation
+		#region Scenario & Communication Translation
 
-        private static FieldInfo f_commandPacks =
+		private static FieldInfo f_commandPacks =
             typeof(TextScenario).GetField("commandPacks", BindingFlags.NonPublic | BindingFlags.Instance);
         
         private static readonly string scenarioDir = Path.Combine(Utility.PluginsDirectory, "translation\\scenario");
@@ -545,10 +605,10 @@ namespace DynamicTranslationLoader
         {
             string path = $@"{Application.dataPath}\..\{(string.IsNullOrEmpty(manifest) ? "abdata" : manifest)}\{bundle}";
 
-            var assetBundle = AssetBundle.LoadFromFile(path);
+            AssetBundleManager.LoadAssetBundleInternal(bundle, false, manifest);
+            var assetBundle = AssetBundleManager.GetLoadedAssetBundle(bundle, out string error, manifest);
 
-            T output = assetBundle.LoadAsset<T>(asset);
-            assetBundle.Unload(false);
+            T output = assetBundle.m_AssetBundle.LoadAsset<T>(asset);
 
             return output;
         }
@@ -653,18 +713,46 @@ namespace DynamicTranslationLoader
                 string communicationPath = Path.Combine(communicationDir, Path.Combine(assetBundleName.Replace("communication/", ""), $"{assetName}.csv")).Replace('/', '\\').Replace(".unity3d", "");
                 
 
+                Logger.Log(LogLevel.Debug, communicationPath);
                 if (File.Exists(communicationPath))
                 {
+                    Logger.Log(LogLevel.Debug, "Loaded!");
                     var rawData = ManualLoadAsset<ExcelData>(assetBundleName, assetName, manifestAssetBundleName);
 
-                    rawData.list.Clear();
+                    //int i = 0;
+                    //foreach (IEnumerable<string> line in SplitAndEscape(File.ReadAllText(communicationPath, Encoding.UTF8)))
+                    //{
+                    //    var list = line.ToList();
+                        
+                    //    Logger.Log(LogLevel.Debug, $"orig ({i}): {string.Join(",", rawData.list[i].list.ToArray())}");
+                    //    Logger.Log(LogLevel.Debug, $"modf ({i}): {string.Join(",", list.ToArray())}");
+                    //    i++;
+                    //}
 
+                    rawData.list.Clear();
+                    
                     foreach (IEnumerable<string> line in SplitAndEscape(File.ReadAllText(communicationPath, Encoding.UTF8)))
                     {
-                        ExcelData.Param param = new ExcelData.Param()
+                        var list = line.ToList();
+
+                        ExcelData.Param param = new ExcelData.Param
                         {
-                            list = line.ToList()
+                            list = list
                         };
+
+                        //for (int i = 0; i < param.list.Count; i++)
+                        //{
+                        //    if (param.list[i].Trim().StartsWith("「"))
+                        //        //&& param.list[15].EndsWith("」"))
+                        //        param.list[i] = "tupac still alive in serbia";
+                        //}
+
+                        
+                        //if (param.list.Count > 16 && !string.IsNullOrEmpty(param.list[16])
+                        //                          && param.list[15].StartsWith("「"))
+                        //    //&& param.list[15].EndsWith("」"))
+                        //    param.list[16] = "tupac still alive in serbia";
+                        
 
                         rawData.list.Add(param);
                     }

@@ -11,6 +11,8 @@
     <AssemblyName>DynamicTranslationLoader</AssemblyName>
     <TargetFrameworkVersion>v3.5</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Mono|AnyCPU' ">
     <DebugType>pdbonly</DebugType>
@@ -51,6 +53,9 @@
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
+    <Reference Include="TARC.Core">
+      <HintPath>..\lib\TARC.Core.dll</HintPath>
+    </Reference>
     <Reference Include="TextMeshPro-1.0.55.56.0b12">
       <HintPath>..\lib\TextMeshPro-1.0.55.56.0b12.dll</HintPath>
       <Private>False</Private>
@@ -84,6 +89,10 @@
       <Name>ResourceRedirector</Name>
     </ProjectReference>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="ILRepack.targets" />
+    <None Include="packages.config" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
     <PostBuildEvent>IF EXIST "$(TargetPath).mdb" del "$(TargetPath).mdb"
@@ -92,4 +101,23 @@ IF EXIST "$(TargetDir)$(TargetName).pdb" del "$(TargetName).pdb"
 IF EXIST "$(TargetDir)$(TargetName).mdb" del "$(TargetName).mdb"
 IF EXIST "$(TargetPath).mdb" ren "$(TargetPath).mdb" "$(TargetName).mdb"</PostBuildEvent>
   </PropertyGroup>
+  <Import Project="..\packages\ILRepack.MSBuild.Task.1.0.9\build\ILRepack.MSBuild.Task.targets" Condition="Exists('..\packages\ILRepack.MSBuild.Task.1.0.9\build\ILRepack.MSBuild.Task.targets')" />
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\ILRepack.MSBuild.Task.1.0.9\build\ILRepack.MSBuild.Task.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\ILRepack.MSBuild.Task.1.0.9\build\ILRepack.MSBuild.Task.targets'))" />
+  </Target>
+  <!-- ILRepack -->
+  <Target Name="AfterBuild">
+    <Move SourceFiles="$(OutputPath)\$(AssemblyName).dll" DestinationFiles="$(OutputPath)\$(AssemblyName)1.dll" />
+    <ItemGroup>
+      <InputAssemblies Include="$(OutputPath)\$(AssemblyName)1.dll" />
+      <InputAssemblies Include="$(OutputPath)\TARC.Core.dll" />
+    </ItemGroup>
+    <ILRepack Parallel="true" Internalize="true" DebugInfo="true" LibraryPath="..\lib\" PrimaryAssemblyFile="$(OutputPath)\$(AssemblyName)1.dll" InputAssemblies="@(InputAssemblies)" TargetKind="Dll" TargetPlatformVersion="v2" OutputFile="$(OutputPath)\$(AssemblyName).dll" />
+    <Delete Files="@(InputAssemblies)" />
+  </Target>
+  <!-- /ILRepack -->
+  <Import Project="..\packages\ILRepack.MSBuild.Task.1.0.9\build\ILRepack.MSBuild.Task.targets" Condition="Exists('..\packages\ILRepack.MSBuild.Task.1.0.9\build\ILRepack.MSBuild.Task.targets')" />
 </Project>
